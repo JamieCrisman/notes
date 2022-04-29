@@ -22,24 +22,6 @@ var (
 	date   = "20XX-01-01"
 )
 
-const DIVIDER = "------"
-const JOURNAL_DATE_FORMAT = "2006-01-02"
-
-type Note struct {
-	Path    string
-	Title   string
-	Tags    []string
-	Content string
-	// header may include metadata that's not necessarily tracked in this struct
-	rawHeader string
-}
-
-//func (i Note) Title() string       { return i.Title }
-func (i Note) Description() string { return strings.Join(i.Tags, ", ") }
-func (i Note) FilterValue() string {
-	return fmt.Sprintf("%s%s%s", i.Title, i.Path, strings.Join(i.Tags, ""))
-}
-
 func addTimestamp(file *os.File, path string, ts time.Time) error {
 	note, err := ParseNote(file, path, false)
 	if err != nil {
@@ -211,11 +193,13 @@ func parseWorker(in chan string, out chan Note, wg *sync.WaitGroup, justHeader, 
 			if outputErrors {
 				fmt.Printf("could not parse file: %v", err)
 			}
+			f.Close()
 			continue
 		}
 		f.Close()
-
-		out <- *note
+		if note != nil {
+			out <- *note
+		}
 	}
 	wg.Done()
 }
@@ -241,16 +225,66 @@ func collectFiles(justHeader, outputFileErrors bool) ([]Note, error) {
 
 	wg.Wait()
 	close(out)
-	results := make([]Note, len(fileList))
-	c := 0
+	results := make([]Note, 0)
 	for result := range out {
-		results[c] = result
-		c++
+		results = append(results, result)
 	}
 
 	return results, nil
 }
 
+var taskCmd = &cobra.Command{
+	Use:     "task",
+	Example: "notes task [filepath] [task]",
+	Short:   "output the contents of a note",
+	Long:    "output the contents of a note. if no note is specified, it goes into an interactive mode to select a note.",
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return nil
+		}
+		preparedFileName, err := checkExistance(args[0], true)
+		if err != nil {
+			return err
+		}
+		args[0] = preparedFileName
+		cmd.SetArgs(args)
+
+		return nil
+	},
+	Run: func(_ *cobra.Command, args []string) {
+		if len(args) == 0 {
+			selectMod, err := NewFileSelector("Select File to Edit Tasks for", false)
+			if err != nil {
+				fmt.Printf("Could not select a file: %v", err)
+				return
+			}
+			m, err := tea.NewProgram(selectMod).StartReturningModel()
+			if err != nil {
+				fmt.Printf("Problem trying to get selection: %v", err)
+				return
+			}
+			model, ok := m.(selectorModel)
+			if !ok {
+				fmt.Println("Could not read selection")
+				return
+			}
+
+			taskViewerMod, err := NewTaskViewer(model.choice)
+			if err != nil {
+				fmt.Printf("Problem updating task: %v\n", err)
+			}
+			if err := tea.NewProgram(taskViewerMod).Start(); err != nil {
+				fmt.Printf("Problem updating task: %v\n", err)
+			}
+
+			return
+
+		}
+		if err := CatNote(args[0]); err != nil {
+			fmt.Printf("Problem trying to cat: %v", err)
+		}
+	},
+}
 var catCmd = &cobra.Command{
 	Use:     "cat",
 	Example: "notes cat [filepath]",
@@ -271,7 +305,7 @@ var catCmd = &cobra.Command{
 	},
 	Run: func(_ *cobra.Command, args []string) {
 		if len(args) == 0 {
-			mod, err := NewFileSelector("Select File to Add an Entry to", true)
+			mod, err := NewFileSelector("Select File to Print the content from", false)
 			if err != nil {
 				fmt.Printf("Could not select a file: %v", err)
 				return
@@ -281,12 +315,12 @@ var catCmd = &cobra.Command{
 				fmt.Printf("Problem trying to get selection: %v", err)
 				return
 			}
-			mod, ok := m.(model)
+			model, ok := m.(selectorModel)
 			if !ok {
 				fmt.Println("Could not read selection")
 				return
 			}
-			fmt.Printf("%s", mod.choice.Content)
+			fmt.Printf("%s", model.choice.Content)
 			return
 
 		}
@@ -339,7 +373,7 @@ var newEntryCmd = &cobra.Command{
 				fmt.Printf("Problem trying to get selection: %v", err)
 				return
 			}
-			mod, ok := m.(model)
+			mod, ok := m.(selectorModel)
 			if !ok {
 				fmt.Println("Could not read selection")
 				return
@@ -410,6 +444,7 @@ func init() {
 	rootCmd.AddCommand(catCmd)
 	rootCmd.AddCommand(newNoteCmd)
 	rootCmd.AddCommand(newEntryCmd)
+	rootCmd.AddCommand(taskCmd)
 }
 
 func Execute() {
